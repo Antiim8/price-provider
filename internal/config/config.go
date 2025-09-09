@@ -41,6 +41,16 @@ type Pricempire struct {
     CacheMaxItems         int      `json:"cache_max_items"`
 }
 
+type Push struct {
+    Enabled     bool     `json:"enabled"`
+    URL         string   `json:"url"`
+    Auth        string   `json:"auth_header"`
+    IntervalSec int      `json:"interval_sec"`
+    Symbols     []string `json:"symbols"`
+    Side        string   `json:"side"`
+    Markets     []string `json:"markets"`
+}
+
 type Skinstable struct {
     Enabled               bool   `json:"enabled"`
     Endpoint              string `json:"endpoint"`
@@ -61,6 +71,7 @@ type Config struct {
     SteamDT    SteamDT    `json:"steamdt"`
     Pricempire Pricempire `json:"pricempire"`
     Skinstable Skinstable `json:"skinstable"`
+    Push       Push       `json:"push"`
 }
 
 func Default() Config {
@@ -99,6 +110,11 @@ func Default() Config {
             Burst: 2,
             CacheTTLSeconds: 15,
             CacheMaxItems:   50000,
+        },
+        Push: Push{
+            Enabled:     false,
+            IntervalSec: 60,
+            Side:        "all",
         },
     }
 }
@@ -216,6 +232,22 @@ func applyEnv(cfg *Config) {
     if v := os.Getenv("SKINSTABLE_CACHE_MAX_ITEMS"); v != "" {
         var x int; fmt.Sscanf(v, "%d", &x); if x > 0 { cfg.Skinstable.CacheMaxItems = x }
     }
+
+    // Push env
+    if v := os.Getenv("PUSH_ENABLED"); v != "" {
+        switch strings.ToLower(v) {
+        case "1","true","yes","y": cfg.Push.Enabled = true
+        case "0","false","no","n": cfg.Push.Enabled = false
+        }
+    }
+    if v := os.Getenv("PUSH_URL"); v != "" { cfg.Push.URL = v }
+    if v := os.Getenv("PUSH_AUTH"); v != "" { cfg.Push.Auth = v }
+    if v := os.Getenv("PUSH_INTERVAL_SEC"); v != "" {
+        var x int; fmt.Sscanf(v, "%d", &x); if x > 0 { cfg.Push.IntervalSec = x }
+    }
+    if v := os.Getenv("PUSH_SYMBOLS"); v != "" { cfg.Push.Symbols = splitCSV(v) }
+    if v := os.Getenv("PUSH_SIDE"); v != "" { cfg.Push.Side = strings.ToLower(strings.TrimSpace(v)) }
+    if v := os.Getenv("PUSH_MARKETS"); v != "" { cfg.Push.Markets = splitCSV(v) }
 }
 
 func splitCSV(s string) []string {

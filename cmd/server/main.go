@@ -1,6 +1,7 @@
 package main
 
 import (
+    "bytes"
     "context"
     "encoding/json"
     "fmt"
@@ -16,6 +17,7 @@ import (
     "sync"
 
     "priceprovider/internal/config"
+    "priceprovider/internal/aggregate"
     "priceprovider/internal/httpx"
     "priceprovider/internal/provider"
     "priceprovider/internal/provider/ratelimit"
@@ -28,6 +30,10 @@ import (
 
 type quotesResponse struct {
     Quotes []provider.Quote `json:"quotes"`
+}
+
+type latestResponse struct {
+    Latest []aggregate.Latest `json:"latest"`
 }
 
 func main() {
@@ -158,6 +164,16 @@ func main() {
             http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
         }
     })
+    mux.HandleFunc("/api/latest", func(w http.ResponseWriter, r *http.Request) {
+        switch r.Method {
+        case http.MethodGet:
+            handleGetLatest(w, r, providers)
+        case http.MethodPost:
+            handlePostLatest(w, r, providers)
+        default:
+            http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+        }
+    })
 
     srv := &http.Server{
         Addr:              ":" + port,
@@ -178,6 +194,65 @@ func main() {
     // graceful shutdown
     ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
     defer stop()
+
+    // Start push ticker if configured
+    if cfg.Push.Enabled && strings.TrimSpace(cfg.Push.URL) != "" && len(cfg.Push.Symbols) > 0 {
+        interval := time.Duration(cfg.Push.IntervalSec) * time.Second
+        if interval <= 0 { interval = 60 * time.Second }
+        log.Printf("push enabled: url=%s interval=%s symbols=%d", cfg.Push.URL, interval, len(cfg.Push.Symbols))
+        go func() {
+            t := time.NewTicker(interval)
+            defer t.Stop()
+            for {
+                select {
+                case <-ctx.Done():
+                    return
+                case <-t.C:
+                    pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+                    // collect quotes
+                    qs, _ := collectQuotes(pctx, providers, cfg.Push.Symbols)
+                    cancel()
+                    // aggregate
+                    side := strings.ToLower(strings.TrimSpace(cfg.Push.Side))
+                    includeSides := side != "all" && side != ""
+                    agg := aggregate.LatestByMarket(qs, includeSides)
+                    // filter by side if specific
+                    if side == "sell" || side == "bid" {
+                        f := agg[:0]
+                        for _, a := range agg { if a.Side == side { f = append(f, a) } }
+                        agg = f
+                    }
+                    // filter by markets if provided
+                    if len(cfg.Push.Markets) > 0 {
+                        want := make(map[string]struct{}, len(cfg.Push.Markets))
+                        for _, m := range cfg.Push.Markets { want[strings.ToLower(strings.TrimSpace(m))] = struct{}{} }
+                        f := agg[:0]
+                        for _, a := range agg {
+                            if _, ok := want[strings.ToLower(a.Market)]; ok { f = append(f, a) }
+                        }
+                        agg = f
+                    }
+                    // post
+                    body, _ := json.Marshal(latestResponse{Latest: agg})
+                    req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Push.URL, bytes.NewReader(body))
+                    if err != nil { log.Printf("push build req: %v", err); continue }
+                    req.Header.Set("Content-Type", "application/json")
+                    if strings.TrimSpace(cfg.Push.Auth) != "" {
+                        req.Header.Set("Authorization", cfg.Push.Auth)
+                    }
+                    resp, err := httpClient.Do(ctx, req)
+                    if err != nil { log.Printf("push error: %v", err); continue }
+                    func() {
+                        defer resp.Body.Close()
+                        if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+                            b, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<10))
+                            log.Printf("push %s -> %d: %s", cfg.Push.URL, resp.StatusCode, string(b))
+                        }
+                    }()
+                }
+            }
+        }()
+    }
     <-ctx.Done()
     shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
     defer cancel()
@@ -224,7 +299,108 @@ func handlePostQuotes(w http.ResponseWriter, r *http.Request, providers []provid
 func writeQuotes(w http.ResponseWriter, rctx context.Context, providers []provider.Provider, symbols []string) {
     ctx, cancel := context.WithTimeout(rctx, 15*time.Second)
     defer cancel()
-    // fan-out to providers concurrently; collect partial results
+    all, errs := collectQuotes(ctx, providers, symbols)
+    if len(all) == 0 && len(errs) > 0 {
+        msgs := make([]string, 0, len(errs))
+        for _, e := range errs { msgs = append(msgs, e.Error()) }
+        http.Error(w, strings.Join(msgs, "; "), http.StatusBadGateway)
+        return
+    }
+    resp := quotesResponse{Quotes: all}
+    w.WriteHeader(http.StatusOK)
+    enc := json.NewEncoder(w)
+    enc.SetEscapeHTML(false)
+    enc.Encode(resp)
+}
+
+// handleGetLatest parses query params and returns latest quotes by market.
+func handleGetLatest(w http.ResponseWriter, r *http.Request, providers []provider.Provider) {
+    q := r.URL.Query().Get("symbols")
+    if strings.TrimSpace(q) == "" {
+        http.Error(w, "missing symbols query param", http.StatusBadRequest)
+        return
+    }
+    symbols := splitCSV(q)
+    if len(symbols) > 1000 {
+        http.Error(w, "too many symbols (max 1000)", http.StatusBadRequest)
+        return
+    }
+    side := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("side")))
+    if side == "" { side = "all" }
+    switch side { case "sell", "bid", "all": default:
+        http.Error(w, "invalid side (sell|bid|all)", http.StatusBadRequest); return }
+    marketsCSV := r.URL.Query().Get("markets")
+    writeLatest(w, r.Context(), providers, symbols, side, marketsCSV)
+}
+
+type latestPostBody struct {
+    Symbols []string `json:"symbols"`
+}
+
+func handlePostLatest(w http.ResponseWriter, r *http.Request, providers []provider.Provider) {
+    var b latestPostBody
+    dec := json.NewDecoder(r.Body)
+    dec.DisallowUnknownFields()
+    if err := dec.Decode(&b); err != nil {
+        http.Error(w, "invalid JSON body", http.StatusBadRequest)
+        return
+    }
+    if len(b.Symbols) == 0 {
+        http.Error(w, "symbols cannot be empty", http.StatusBadRequest)
+        return
+    }
+    if len(b.Symbols) > 1000 {
+        http.Error(w, "too many symbols (max 1000)", http.StatusBadRequest)
+        return
+    }
+    side := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("side")))
+    if side == "" { side = "all" }
+    switch side { case "sell", "bid", "all": default:
+        http.Error(w, "invalid side (sell|bid|all)", http.StatusBadRequest); return }
+    marketsCSV := r.URL.Query().Get("markets")
+    writeLatest(w, r.Context(), providers, b.Symbols, side, marketsCSV)
+}
+
+func writeLatest(w http.ResponseWriter, rctx context.Context, providers []provider.Provider, symbols []string, side string, marketsCSV string) {
+    ctx, cancel := context.WithTimeout(rctx, 15*time.Second)
+    defer cancel()
+    qs, errs := collectQuotes(ctx, providers, symbols)
+    if len(qs) == 0 && len(errs) > 0 {
+        msgs := make([]string, 0, len(errs))
+        for _, e := range errs { msgs = append(msgs, e.Error()) }
+        http.Error(w, strings.Join(msgs, "; "), http.StatusBadGateway)
+        return
+    }
+    includeSides := side != "all"
+    agg := aggregate.LatestByMarket(qs, includeSides)
+    // filter by specific side if provided
+    if side == "sell" || side == "bid" {
+        f := agg[:0]
+        for _, a := range agg {
+            if a.Side == side { f = append(f, a) }
+        }
+        agg = f
+    }
+    // filter by markets if provided
+    markets := splitCSV(marketsCSV)
+    if len(markets) > 0 {
+        want := make(map[string]struct{}, len(markets))
+        for _, m := range markets { want[strings.ToLower(strings.TrimSpace(m))] = struct{}{} }
+        f := agg[:0]
+        for _, a := range agg {
+            if _, ok := want[strings.ToLower(a.Market)]; ok { f = append(f, a) }
+        }
+        agg = f
+    }
+    resp := latestResponse{Latest: agg}
+    w.WriteHeader(http.StatusOK)
+    enc := json.NewEncoder(w)
+    enc.SetEscapeHTML(false)
+    enc.Encode(resp)
+}
+
+// collectQuotes fans out requests to providers for the given symbols and returns combined quotes and partial errors.
+func collectQuotes(ctx context.Context, providers []provider.Provider, symbols []string) ([]provider.Quote, []error) {
     type result struct { quotes []provider.Quote; err error }
     ch := make(chan result, len(providers))
     for _, p := range providers {
@@ -235,21 +411,13 @@ func writeQuotes(w http.ResponseWriter, rctx context.Context, providers []provid
         }()
     }
     var all []provider.Quote
-    var errs []string
+    var errs []error
     for i := 0; i < len(providers); i++ {
         r := <-ch
-        if r.err != nil { errs = append(errs, r.err.Error()); continue }
+        if r.err != nil { errs = append(errs, r.err); continue }
         all = append(all, r.quotes...)
     }
-    if len(all) == 0 && len(errs) > 0 {
-        http.Error(w, strings.Join(errs, "; "), http.StatusBadGateway)
-        return
-    }
-    resp := quotesResponse{Quotes: all}
-    w.WriteHeader(http.StatusOK)
-    enc := json.NewEncoder(w)
-    enc.SetEscapeHTML(false)
-    enc.Encode(resp)
+    return all, errs
 }
 
 func withJSONHeaders(next http.Handler) http.Handler {

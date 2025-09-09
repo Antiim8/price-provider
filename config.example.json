@@ -49,4 +49,17 @@
     "cache_ttl_sec": 15,
     "cache_max_items": 50000
   }
+  ,
+  "push": {
+    "enabled": false,
+    "url": "https://example.com/ingest/latest",
+    "auth_header": "Bearer <token>",
+    "interval_sec": 60,
+    "symbols": [
+      "AK-47 | Redline (Field-Tested)",
+      "MP9 | Starlight Protector (Battle-Scarred)"
+    ],
+    "side": "all",
+    "markets": ["BUFF","CS.MONEY","Steam"]
+  }
 }

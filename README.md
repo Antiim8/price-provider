@@ -37,6 +37,13 @@ Environment variables:
 - `SKINSTABLE_ITEMS_CACHE_TTL_SEC` (default `15`)
 - `SKINSTABLE_MAX_RPM`, `SKINSTABLE_MIN_INTERVAL_SEC`, `SKINSTABLE_BURST`
 - `SKINSTABLE_CACHE_TTL_SEC`, `SKINSTABLE_CACHE_MAX_ITEMS`
+ - `PUSH_ENABLED` (default `false`)
+ - `PUSH_URL` (destination endpoint)
+ - `PUSH_AUTH` (Authorization header value, optional)
+ - `PUSH_INTERVAL_SEC` (default `60`)
+ - `PUSH_SYMBOLS` (CSV of symbols to push)
+ - `PUSH_SIDE` (`all`|`sell`|`bid`; default `all`)
+ - `PUSH_MARKETS` (CSV filter; optional)
 
 Config file (preferred):
 
@@ -64,6 +71,13 @@ Example `config.json` keys:
 - `skinstable.items_cache_ttl_sec`: cache full items payload
 - `skinstable.max_requests_per_minute`/`min_request_interval_sec`/`burst`: rate limiting
 - `skinstable.cache_ttl_sec`/`cache_max_items`: per-symbol cache wrapper
+ - `push.enabled`: enable background push
+ - `push.url`: POST destination
+ - `push.auth_header`: Authorization header value (optional)
+ - `push.interval_sec`: push interval in seconds (default 60)
+ - `push.symbols`: list of symbols to include in push
+ - `push.side`: `all`|`sell`|`bid`
+ - `push.markets`: optional list of markets to include
 
 Start the server:
 
@@ -82,6 +96,22 @@ Response shape:
 {
   "quotes": [
     {"symbol":"...","price":"...","currency":"CNY","source":"SteamDT:Steam:sell","received_at":"..."}
+  ]
+}
+```
+
+Latest by market (aggregated):
+
+- GET: `http://localhost:8080/api/latest?symbols=A,B&side=all` (optional `markets` CSV filter)
+- POST: `POST /api/latest?side=all` with body `{ "symbols": ["A","B"] }`
+
+Response shape:
+
+```
+{
+  "latest": [
+    {"symbol":"A","market":"BUFF","side":"sell","currency":"CNY","price":"260.00","provider":"SteamDT","received_at":"..."},
+    {"symbol":"A","market":"Steam","side":"","currency":"USD","price":"...","provider":"Pricempire","received_at":"..."}
   ]
 }
 ```
