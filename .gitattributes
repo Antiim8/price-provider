@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+# Scripts and code should stay LF in WSL
+*.sh text eol=lf
+*.go text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+
+# PowerShell prefers CRLF on Windows hosts
+*.ps1 text eol=crlf
+
+# Binary files
+*.zip -text
+*.png -text
+*.jpg -text

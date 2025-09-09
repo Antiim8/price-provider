@@ -1,0 +1,52 @@
+{
+  "server": {
+    "port": "8080",
+    "request_timeout_sec": 10
+  },
+  "steamdt": {
+    "enabled": true,
+    "api_key": "",
+    "endpoint": "https://open.steamdt.com/open/cs2/v1/price/batch",
+    "include_bids": true,
+    "currency": "CNY",
+    "max_requests_per_minute": 1,
+    "burst": 1,
+    "max_items_per_request": 200,
+    "max_concurrency": 2,
+    "cache_ttl_sec": 3,
+    "cache_max_items": 10000
+  },
+  "pricempire": {
+    "enabled": true,
+    "api_key": "",
+    "app_id": 730,
+    "currency": "USD",
+    "sources": [
+      "buff"
+    ],
+    "max_requests_per_minute": 2,
+    "burst": 2,
+    "cache_ttl_sec": 15,
+    "cache_max_items": 50000
+  }
+  ,
+  "skinstable": {
+    "enabled": false,
+    "endpoint": "https://skins-table.com/api_v2/items",
+    "api_key": "",
+    "currency": "USD",
+    "app_id": 730,
+    "sites": [
+      "CS.MONEY",
+      "BUFF.163",
+      "STEAM",
+      "C5GAME",
+      "WAXPEER"
+    ],
+    "items_cache_ttl_sec": 15,
+    "max_requests_per_minute": 2,
+    "burst": 2,
+    "cache_ttl_sec": 15,
+    "cache_max_items": 50000
+  }
+}

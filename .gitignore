@@ -1,0 +1,16 @@
+# Local configuration and secrets
+config.json
+
+# Local caches
+.gocache/
+.gomodcache/
+
+# Large generated data dumps
+steamdt_all_prices.json
+pricempire_all_prices.json
+
+# OS/editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
