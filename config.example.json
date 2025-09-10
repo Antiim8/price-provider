@@ -8,7 +8,7 @@
     "api_key": "",
     "endpoint": "https://open.steamdt.com/open/cs2/v1/price/batch",
     "include_bids": true,
-    "currency": "CNY",
+    "currency": "USD",
     "max_requests_per_minute": 1,
     "burst": 1,
     "max_items_per_request": 200,

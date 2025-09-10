@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Price Provider — Deals Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Deals Dashboard</h1>
+      <p>Fetch aggregated latest quotes from /api/latest to verify providers.</p>
+    </header>
+
+    <section class="controls">
+      <div class="field">
+        <label>Symbols (CSV)</label>
+        <input id="symbols" type="text" placeholder="AK-47 | Redline (Field-Tested), MP9 | Starlight Protector (Battle-Scarred)" />
+      </div>
+      <div class="field">
+        <label>Side</label>
+        <select id="side">
+          <option value="all" selected>all</option>
+          <option value="sell">sell</option>
+          <option value="bid">bid</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Markets (CSV, optional)</label>
+        <input id="markets" type="text" placeholder="BUFF,Steam,CS.MONEY" />
+      </div>
+      <div class="field">
+        <label>Auto Refresh (sec)</label>
+        <input id="refresh" type="number" min="0" value="15" />
+      </div>
+      <div class="actions">
+        <button id="fetchBtn">Fetch</button>
+        <span id="status"></span>
+      </div>
+    </section>
+
+    <section>
+      <table id="deals">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Market</th>
+            <th>Side</th>
+            <th>Currency</th>
+            <th>Price</th>
+            <th>Provider</th>
+            <th>Received</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>
+

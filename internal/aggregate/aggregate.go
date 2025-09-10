@@ -18,13 +18,13 @@ type MarketKey struct {
 
 // Latest is the latest quote per MarketKey.
 type Latest struct {
-    Symbol     string
-    Market     string
-    Side       string
-    Currency   string
-    Price      string
-    Provider   string
-    ReceivedAt time.Time
+    Symbol     string    `json:"symbol"`
+    Market     string    `json:"market"`
+    Side       string    `json:"side"`
+    Currency   string    `json:"currency"`
+    Price      string    `json:"price"`
+    Provider   string    `json:"provider"`
+    ReceivedAt time.Time `json:"received_at"`
 }
 
 // NormalizeSource extracts market and side from a quote Source.
@@ -40,6 +40,19 @@ type Latest struct {
 //     C5, C5GAME -> C5GAME
 //     CSMONEY, CS.MONEY -> CS.MONEY
 //     SKINPORT, Skinport -> Skinport
+// aliasMap normalizes various market/site spellings and aliases.
+var aliasMap = map[string]string{
+    "buff":     "BUFF",
+    "buff.163": "BUFF",
+    "buff163":  "BUFF",
+    "steam":    "Steam",
+    "c5":       "C5GAME",
+    "c5game":   "C5GAME",
+    "csmoney":  "CS.MONEY",
+    "cs.money": "CS.MONEY",
+    "skinport": "Skinport",
+}
+
 func NormalizeSource(src string) (market string, side string) {
     s := strings.TrimSpace(src)
     if s == "" { return "", "" }
@@ -61,20 +74,10 @@ func NormalizeSource(src string) (market string, side string) {
     }
 
     m := strings.TrimSpace(mraw)
-    lm := strings.ToLower(m)
-    switch lm {
-    case "buff", "buff.163", "buff163":
-        market = "BUFF"
-    case "steam":
-        market = "Steam"
-    case "c5", "c5game":
-        market = "C5GAME"
-    case "csmoney", "cs.money":
-        market = "CS.MONEY"
-    case "skinport":
-        market = "Skinport"
-    default:
-        market = strings.TrimSpace(mraw)
+    if norm, ok := aliasMap[strings.ToLower(m)]; ok {
+        market = norm
+    } else {
+        market = m
     }
 
     side = strings.ToLower(strings.TrimSpace(sraw))
@@ -145,4 +148,3 @@ func LatestByMarket(quotes []provider.Quote, includeSides bool) []Latest {
     })
     return out
 }
-
