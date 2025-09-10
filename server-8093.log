@@ -1,0 +1,3 @@
+2025/09/10 17:43:59 server listening on :8093
+2025/09/10 17:43:59 server: listen tcp :8093: bind: address already in use
+exit status 1

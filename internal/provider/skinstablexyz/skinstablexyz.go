@@ -10,6 +10,7 @@ import (
 
     "priceprovider/internal/httpx"
     "priceprovider/internal/provider"
+    "sync"
 )
 
 // Config controls the SkinstableXYZ provider behavior.
@@ -51,14 +52,41 @@ func (p *Provider) Fetch(ctx context.Context, symbols []string) ([]provider.Quot
 
     now := time.Now()
     if p.cache == nil { p.cache = make(map[string]siteCache, len(p.cfg.Sites)) }
-    // Ensure cache for each site
+    // Ensure cache for each site. Fetch uncached/expired sites concurrently with per-site timeouts.
+    var anySuccess bool
+    var lastErr error
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    // Track whether at least one site already has valid cache
+    for _, site := range p.cfg.Sites {
+        if sc, ok := p.cache[site]; ok && now.Before(sc.until) {
+            anySuccess = true
+        }
+    }
     for _, site := range p.cfg.Sites {
         sc, ok := p.cache[site]
-        if !ok || now.After(sc.until) {
-            items, until, err := p.fetchSite(ctx, site)
-            if err != nil { return nil, err }
+        if ok && now.Before(sc.until) { continue }
+        wg.Add(1)
+        site := site
+        go func() {
+            defer wg.Done()
+            perSiteCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+            items, until, err := p.fetchSite(perSiteCtx, site)
+            cancel()
+            if err != nil {
+                mu.Lock(); lastErr = err; mu.Unlock()
+                return
+            }
+            mu.Lock()
             p.cache[site] = siteCache{items: items, until: until}
-        }
+            anySuccess = true
+            mu.Unlock()
+        }()
+    }
+    wg.Wait()
+    if !anySuccess {
+        if lastErr != nil { return nil, lastErr }
+        return nil, fmt.Errorf("skinstable: no data from any site")
     }
 
     out := make([]provider.Quote, 0, len(symbols))

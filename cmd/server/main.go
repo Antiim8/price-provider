@@ -15,6 +15,7 @@ import (
     "compress/gzip"
     "io"
     "sync"
+    "sort"
 
     "priceprovider/internal/config"
     "priceprovider/internal/aggregate"
@@ -36,6 +37,10 @@ type latestResponse struct {
     Latest []aggregate.Latest `json:"latest"`
 }
 
+// apiTimeoutSec is the per-request timeout used when collecting quotes
+// from providers. It is initialized from config on startup.
+var apiTimeoutSec = 15
+
 func main() {
     // Config
     cfgPath := os.Getenv("CONFIG_FILE")
@@ -43,6 +48,8 @@ func main() {
     if err != nil { log.Fatalf("config: %v", err) }
     port := cfg.Server.Port
     timeoutSec := cfg.Server.RequestTimeoutSec
+    if timeoutSec <= 0 { timeoutSec = 10 }
+    apiTimeoutSec = timeoutSec
 
     if cfg.SteamDT.Enabled && cfg.SteamDT.APIKey == "" {
         log.Println("warning: steamdt.enabled=true but STEAMDT_API_KEY not set")
@@ -174,6 +181,58 @@ func main() {
             http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
         }
     })
+    // Expose all item names from Skinstable (for bulk testing in the UI).
+    mux.HandleFunc("/api/items", func(w http.ResponseWriter, r *http.Request) {
+        if !cfg.Skinstable.Enabled {
+            http.Error(w, "skinstable disabled", http.StatusBadRequest)
+            return
+        }
+        sitesParam := strings.TrimSpace(r.URL.Query().Get("sites"))
+        var sites []string
+        if sitesParam != "" {
+            sites = splitCSV(sitesParam)
+        } else {
+            sites = append([]string(nil), cfg.Skinstable.Sites...)
+        }
+        if len(sites) == 0 { sites = []string{"CS.MONEY"} }
+        type apiResp struct { Items map[string]struct{ N string `json:"n"` } `json:"items"` }
+        ctx, cancel := context.WithTimeout(r.Context(), time.Duration(apiTimeoutSec)*time.Second)
+        defer cancel()
+        names := make(map[string]struct{}, 64000)
+        for _, site := range sites {
+            u := cfg.Skinstable.Endpoint
+            if strings.TrimSpace(u) == "" { http.Error(w, "skinstable endpoint missing", http.StatusBadRequest); return }
+            req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+            if err != nil { http.Error(w, err.Error(), http.StatusInternalServerError); return }
+            q := req.URL.Query()
+            if cfg.Skinstable.APIKey != "" { q.Set("apikey", cfg.Skinstable.APIKey) }
+            if cfg.Skinstable.AppID > 0 { q.Set("app", fmt.Sprintf("%d", cfg.Skinstable.AppID)) }
+            if site != "" { q.Set("site", site) }
+            req.URL.RawQuery = q.Encode()
+            req.Header.Set("Accept", "application/json")
+            resp, err := httpClient.Do(ctx, req)
+            if err != nil { http.Error(w, err.Error(), http.StatusBadGateway); return }
+            func() {
+                defer resp.Body.Close()
+                if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+                    http.Error(w, fmt.Sprintf("upstream %s -> %d", req.URL.String(), resp.StatusCode), http.StatusBadGateway)
+                    return
+                }
+                var body apiResp
+                dec := json.NewDecoder(resp.Body)
+                if err := dec.Decode(&body); err != nil { http.Error(w, err.Error(), http.StatusBadGateway); return }
+                for k := range body.Items { if strings.TrimSpace(k) != "" { names[k] = struct{}{} } }
+            }()
+        }
+        list := make([]string, 0, len(names))
+        for k := range names { list = append(list, k) }
+        // sort for stable output
+        sort.Strings(list)
+        w.WriteHeader(http.StatusOK)
+        enc := json.NewEncoder(w)
+        enc.SetEscapeHTML(false)
+        _ = enc.Encode(struct { Items []string `json:"items"` }{Items: list})
+    })
 
     // Static website for quick manual verification (served from ./web)
     // Registered last so that /api/* routes take precedence.
@@ -212,7 +271,7 @@ func main() {
                 case <-ctx.Done():
                     return
                 case <-t.C:
-                    pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+                    pctx, cancel := context.WithTimeout(ctx, time.Duration(apiTimeoutSec)*time.Second)
                     // collect quotes
                     qs, _ := collectQuotes(pctx, providers, cfg.Push.Symbols)
                     cancel()
@@ -301,7 +360,7 @@ func handlePostQuotes(w http.ResponseWriter, r *http.Request, providers []provid
 }
 
 func writeQuotes(w http.ResponseWriter, rctx context.Context, providers []provider.Provider, symbols []string) {
-    ctx, cancel := context.WithTimeout(rctx, 15*time.Second)
+    ctx, cancel := context.WithTimeout(rctx, time.Duration(apiTimeoutSec)*time.Second)
     defer cancel()
     all, errs := collectQuotes(ctx, providers, symbols)
     if len(all) == 0 && len(errs) > 0 {
@@ -366,7 +425,7 @@ func handlePostLatest(w http.ResponseWriter, r *http.Request, providers []provid
 }
 
 func writeLatest(w http.ResponseWriter, rctx context.Context, providers []provider.Provider, symbols []string, side string, marketsCSV string) {
-    ctx, cancel := context.WithTimeout(rctx, 15*time.Second)
+    ctx, cancel := context.WithTimeout(rctx, time.Duration(apiTimeoutSec)*time.Second)
     defer cancel()
     qs, errs := collectQuotes(ctx, providers, symbols)
     if len(qs) == 0 && len(errs) > 0 {
