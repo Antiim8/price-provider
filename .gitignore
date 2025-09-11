@@ -4,6 +4,13 @@ config.json
 # Local caches
 .gocache/
 .gomodcache/
+# Workspace-local caches created during local builds/tests
+.gocache_build/
+.gopath/
+
+# Local run logs and pids
+server-*.log
+server-*.pid
 
 # Large generated data dumps
 steamdt_all_prices.json

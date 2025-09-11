@@ -6,11 +6,13 @@ import (
     "fmt"
     "net/http"
     "net/url"
+    "strconv"
+    "sync"
     "time"
 
     "priceprovider/internal/httpx"
     "priceprovider/internal/provider"
-    "sync"
+    "golang.org/x/sync/singleflight"
 )
 
 // Config controls the SkinstableXYZ provider behavior.
@@ -32,7 +34,11 @@ type Provider struct {
     client *httpx.Client
 
     // cached full items payload
-    cache map[string]siteCache // key: site -> items + expiry
+    cache   map[string]siteCache // key: site -> items + expiry
+    cacheMu sync.RWMutex
+
+    // coalesce concurrent refreshes per-site
+    sf singleflight.Group
 }
 
 func New(cfg Config, hc *httpx.Client) *Provider {
@@ -44,63 +50,103 @@ func New(cfg Config, hc *httpx.Client) *Provider {
 func (p *Provider) Name() string { return p.cfg.Name }
 
 func (p *Provider) Fetch(ctx context.Context, symbols []string) ([]provider.Quote, error) {
+    // a) Config guards
     if p.cfg.URL == "" {
         return nil, fmt.Errorf("skinstable: missing URL")
     }
-    if p.cfg.AppID == 0 { p.cfg.AppID = 730 }
-    if len(p.cfg.Sites) == 0 { p.cfg.Sites = []string{"CS.MONEY"} }
+    if p.cfg.AppID == 0 {
+        p.cfg.AppID = 730
+    }
+    if len(p.cfg.Sites) == 0 {
+        p.cfg.Sites = []string{"CS.MONEY"}
+    }
 
     now := time.Now()
-    if p.cache == nil { p.cache = make(map[string]siteCache, len(p.cfg.Sites)) }
-    // Ensure cache for each site. Fetch uncached/expired sites concurrently with per-site timeouts.
-    var anySuccess bool
+
+    // b) Lazy init cache under write lock
+    p.cacheMu.Lock()
+    if p.cache == nil {
+        p.cache = make(map[string]siteCache, len(p.cfg.Sites))
+    }
+    p.cacheMu.Unlock()
+
+    // c) Double-checked refresh per site
+    var anyValid bool
     var lastErr error
-    var mu sync.Mutex
-    var wg sync.WaitGroup
-    // Track whether at least one site already has valid cache
     for _, site := range p.cfg.Sites {
-        if sc, ok := p.cache[site]; ok && now.Before(sc.until) {
-            anySuccess = true
+        // Read snapshot of current entry
+        p.cacheMu.RLock()
+        sc, ok := p.cache[site]
+        expired := !ok || now.After(sc.until)
+        if ok && !expired {
+            anyValid = true
+        }
+        p.cacheMu.RUnlock()
+
+        if expired {
+            // Coalesce refreshes per-site to avoid duplicate upstream calls
+            type result struct {
+                items map[string]item
+                until time.Time
+            }
+            v, err, _ := p.sf.Do(site, func() (any, error) {
+                perSiteCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+                defer cancel()
+                items, until, err := p.fetchSite(perSiteCtx, site)
+                if err != nil { return nil, err }
+                return result{items: items, until: until}, nil
+            })
+            if err != nil {
+                // Record last error; continue to check other sites
+                lastErr = err
+            } else {
+                res := v.(result)
+                // Write new snapshot if still expired/missing (use fresh time)
+                p.cacheMu.Lock()
+                sc2, ok2 := p.cache[site]
+                if !ok2 || time.Now().After(sc2.until) {
+                    p.cache[site] = siteCache{items: res.items, until: res.until}
+                }
+                p.cacheMu.Unlock()
+                anyValid = true
+            }
         }
     }
-    for _, site := range p.cfg.Sites {
-        sc, ok := p.cache[site]
-        if ok && now.Before(sc.until) { continue }
-        wg.Add(1)
-        site := site
-        go func() {
-            defer wg.Done()
-            perSiteCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
-            items, until, err := p.fetchSite(perSiteCtx, site)
-            cancel()
-            if err != nil {
-                mu.Lock(); lastErr = err; mu.Unlock()
-                return
-            }
-            mu.Lock()
-            p.cache[site] = siteCache{items: items, until: until}
-            anySuccess = true
-            mu.Unlock()
-        }()
-    }
-    wg.Wait()
-    if !anySuccess {
-        if lastErr != nil { return nil, lastErr }
+
+    if !anyValid {
+        if lastErr != nil {
+            return nil, lastErr
+        }
         return nil, fmt.Errorf("skinstable: no data from any site")
     }
 
+    // d) Snapshot caches for lock-free reads
+    type siteSnapshot struct {
+        site string
+        sc   siteCache
+    }
+    snaps := make([]siteSnapshot, 0, len(p.cfg.Sites))
+    p.cacheMu.RLock()
+    for _, site := range p.cfg.Sites {
+        if sc, ok := p.cache[site]; ok {
+            snaps = append(snaps, siteSnapshot{site: site, sc: sc})
+        }
+    }
+    p.cacheMu.RUnlock()
+
     out := make([]provider.Quote, 0, len(symbols))
-    for _, s := range symbols {
-        for _, site := range p.cfg.Sites {
-            sc := p.cache[site]
-            it, ok := sc.items[s]
-            if !ok || it.P == nil { continue }
+    for _, snap := range snaps {
+        for _, s := range symbols {
+            it, ok := snap.sc.items[s]
+            if !ok || it.P == nil {
+                continue
+            }
             ts := parseEpochMaybeMillis(it.T, now)
             out = append(out, provider.Quote{
                 Symbol:     s,
                 Price:      formatFloat(*it.P),
                 Currency:   p.cfg.Currency,
-                Source:     fmt.Sprintf("%s:%s", p.cfg.Name, site),
+                Source:     fmt.Sprintf("%s:%s", p.cfg.Name, snap.site),
                 ReceivedAt: ts,
             })
         }
@@ -148,17 +194,11 @@ type apiResponse struct {
 }
 
 type item struct {
-    N string   `json:"n"`
     P *float64 `json:"p"`
-    C *int     `json:"c"`
-    M *int     `json:"m"`
-    B *int     `json:"b"`
-    O *int     `json:"o"`
-    F json.RawMessage `json:"f"`
-    T int64    `json:"t"` // epoch millis
+    T int64    `json:"t"`
 }
 
-func formatFloat(v float64) string { return fmt.Sprintf("%g", v) }
+func formatFloat(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 
 func parseEpochMaybeMillis(v int64, fallback time.Time) time.Time {
     if v <= 0 { return fallback }
